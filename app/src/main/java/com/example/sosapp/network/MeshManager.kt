@@ -1,7 +1,11 @@
 package com.example.sosapp.network
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.example.sosapp.data.SosDao
 import com.example.sosapp.data.SosMessage
 import com.google.android.gms.nearby.Nearby
@@ -26,6 +30,10 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
 
     private val connectedEndpoints = mutableSetOf<String>()
     private var observationJob: Job? = null
+
+    init {
+        createSosNotificationChannel()
+    }
 
     fun startMesh() {
         Log.i("MESH", "Starting Mesh Service as: $myEndpointId")
@@ -147,17 +155,13 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
                 Log.d("MESH", "Received ${receivedMessages.size} messages from $endpointId")
                 CoroutineScope(Dispatchers.IO).launch {
                     val currentMessages = dao.getAllMessages().first()
-                    var newMessagesCount = 0
                     receivedMessages.forEach { incoming ->
                         if (incoming.senderId == myEndpointId) return@forEach
                         if (currentMessages.none { it.id == incoming.id }) {
                             Log.i("MESH", "Received NEW SOS message: ${incoming.id.take(8)} from ${incoming.senderId}")
                             dao.insert(incoming.copy(isMyMessage = false, hopCount = incoming.hopCount + 1))
-                            newMessagesCount++
+                            showSosNotification(incoming)
                         }
-                    }
-                    if (newMessagesCount > 0) {
-                        Log.i("MESH", "Relayed $newMessagesCount new messages")
                     }
                 }
             } catch (e: Exception) { 
@@ -169,5 +173,34 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
                 Log.e("MESH", "Payload transfer to $endpointId failed")
             }
         }
+    }
+
+    private fun createSosNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Emergency SOS Alerts"
+            val descriptionText = "Notifications for received SOS messages"
+            val importance = NotificationManager.IMPORTANCE_HIGH
+            val channel = NotificationChannel("SOS_ALERT_CHANNEL", name, importance).apply {
+                description = descriptionText
+                enableVibration(true)
+                enableLights(true)
+            }
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showSosNotification(message: SosMessage) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notification = NotificationCompat.Builder(context, "SOS_ALERT_CHANNEL")
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("CRITICAL SOS RECEIVED!")
+            .setContentText("From: ${message.senderId.takeLast(10)} | Msg: ${message.content}")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(message.id.hashCode(), notification)
     }
 }
