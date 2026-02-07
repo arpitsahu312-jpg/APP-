@@ -12,5 +12,6 @@ data class SosMessage(
     val longitude: Double,
     val timestamp: Long,
     val isMyMessage: Boolean,
-    val hopCount: Int = 0
+    val hopCount: Int = 0,
+    val equipment: String? = null // e.g., "First Aid Kit", "Water", etc.
 )
