@@ -12,11 +12,9 @@
         android:id="@+id/btnDownload"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Save Map Offline"
-        android:backgroundTint="#009688"
-        android:textColor="#FFFFFF"
+        android:text="Test Button"
         android:layout_alignParentBottom="true"
         android:layout_centerHorizontal="true"
-        android:layout_marginBottom="30dp"/>
+        android:layout_marginBottom="50dp"/>
 
 </RelativeLayout>
