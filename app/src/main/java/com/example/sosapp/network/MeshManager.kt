@@ -50,21 +50,32 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
         observationJob?.cancel()
         observationJob = CoroutineScope(Dispatchers.IO).launch {
             dao.getAllMessages().collectLatest { messages ->
+                Log.d("MESH", "Database updated, re-broadcasting ${messages.size} messages")
                 broadcastMessages(messages)
             }
         }
     }
 
-    private fun broadcastMessages(messages: List<SosMessage>) {
-        if (messages.isEmpty()) return
+    fun broadcastMessages(messages: List<SosMessage>) {
+        if (messages.isEmpty()) {
+            Log.v("MESH", "No messages to broadcast")
+            return
+        }
         val endpointsToNotify = synchronized(connectedEndpoints) { connectedEndpoints.toList() }
-        if (endpointsToNotify.isEmpty()) return
         
+        if (endpointsToNotify.isEmpty()) {
+            Log.w("MESH", "No connected endpoints to broadcast to. Connected count: 0")
+            return
+        }
+        
+        Log.d("MESH", "Broadcasting ${messages.size} messages to ${endpointsToNotify.size} endpoints")
         val json = gson.toJson(messages)
         val payload = Payload.fromBytes(json.toByteArray(StandardCharsets.UTF_8))
         
         endpointsToNotify.forEach { endpointId ->
             Nearby.getConnectionsClient(context).sendPayload(endpointId, payload)
+                .addOnSuccessListener { Log.v("MESH", "Payload successfully sent to $endpointId") }
+                .addOnFailureListener { e -> Log.e("MESH", "Failed to send payload to $endpointId", e) }
         }
     }
 
@@ -72,11 +83,11 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
         val options = AdvertisingOptions.Builder().setStrategy(strategy).build()
         Nearby.getConnectionsClient(context).startAdvertising(
             myEndpointId, serviceId, connectionLifecycleCallback, options
-        ).addOnFailureListener { e -> Log.e("MESH", "Adv failed: $e") }
+        ).addOnSuccessListener { Log.i("MESH", "Advertising started successfully") }
+         .addOnFailureListener { e -> Log.e("MESH", "Advertising failed to start", e) }
     }
 
     private fun startDiscovery() {
-        // DISABLING Low Power mode for maximum range/sensitivity
         val options = DiscoveryOptions.Builder()
             .setStrategy(strategy)
             .setLowPower(false) 
@@ -84,31 +95,45 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
             
         Nearby.getConnectionsClient(context).startDiscovery(
             serviceId, endpointDiscoveryCallback, options
-        ).addOnFailureListener { e -> Log.e("MESH", "Discovery failed: $e") }
+        ).addOnSuccessListener { Log.i("MESH", "Discovery started successfully") }
+         .addOnFailureListener { e -> Log.e("MESH", "Discovery failed to start", e) }
     }
 
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
+            Log.i("MESH", "Found endpoint: $endpointId (${info.endpointName}). Requesting connection...")
             Nearby.getConnectionsClient(context).requestConnection(myEndpointId, endpointId, connectionLifecycleCallback)
+                .addOnFailureListener { e -> Log.e("MESH", "Connection request to $endpointId failed", e) }
         }
-        override fun onEndpointLost(endpointId: String) {}
+        override fun onEndpointLost(endpointId: String) {
+            Log.i("MESH", "Endpoint lost: $endpointId")
+        }
     }
 
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
+            Log.i("MESH", "Connection initiated with $endpointId (${info.endpointName}). Accepting...")
             Nearby.getConnectionsClient(context).acceptConnection(endpointId, payloadCallback)
+                .addOnFailureListener { e -> Log.e("MESH", "Accepting connection from $endpointId failed", e) }
         }
         override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
             if (result.status.isSuccess) {
+                Log.i("MESH", "Successfully connected to $endpointId")
                 synchronized(connectedEndpoints) { connectedEndpoints.add(endpointId) }
-                // Sync immediately on connection
+                // Sync immediately on connection: send all known messages to the new peer
                 CoroutineScope(Dispatchers.IO).launch {
                     val messages = dao.getAllMessages().first()
-                    if (messages.isNotEmpty()) broadcastMessages(messages)
+                    if (messages.isNotEmpty()) {
+                        Log.d("MESH", "Syncing known messages with new peer $endpointId")
+                        broadcastMessages(messages)
+                    }
                 }
+            } else {
+                Log.e("MESH", "Connection to $endpointId failed with status: ${result.status.statusMessage}")
             }
         }
         override fun onDisconnected(endpointId: String) {
+            Log.w("MESH", "Disconnected from $endpointId")
             synchronized(connectedEndpoints) { connectedEndpoints.remove(endpointId) }
         }
     }
@@ -119,17 +144,30 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
             val json = String(bytes, StandardCharsets.UTF_8)
             try {
                 val receivedMessages = gson.fromJson(json, Array<SosMessage>::class.java)
+                Log.d("MESH", "Received ${receivedMessages.size} messages from $endpointId")
                 CoroutineScope(Dispatchers.IO).launch {
                     val currentMessages = dao.getAllMessages().first()
+                    var newMessagesCount = 0
                     receivedMessages.forEach { incoming ->
                         if (incoming.senderId == myEndpointId) return@forEach
                         if (currentMessages.none { it.id == incoming.id }) {
+                            Log.i("MESH", "Received NEW SOS message: ${incoming.id.take(8)} from ${incoming.senderId}")
                             dao.insert(incoming.copy(isMyMessage = false, hopCount = incoming.hopCount + 1))
+                            newMessagesCount++
                         }
                     }
+                    if (newMessagesCount > 0) {
+                        Log.i("MESH", "Relayed $newMessagesCount new messages")
+                    }
                 }
-            } catch (e: Exception) { Log.e("MESH", "Payload error: $e") }
+            } catch (e: Exception) { 
+                Log.e("MESH", "Error parsing incoming payload from $endpointId", e) 
+            }
         }
-        override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {}
+        override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {
+            if (update.status == PayloadTransferUpdate.Status.FAILURE) {
+                Log.e("MESH", "Payload transfer to $endpointId failed")
+            }
+        }
     }
 }

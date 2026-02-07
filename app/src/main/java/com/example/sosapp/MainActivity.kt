@@ -1,16 +1,20 @@
 package com.example.sosapp
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioAttributes
 import android.media.AudioTrack
 import android.os.Bundle
+import android.os.IBinder
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -41,9 +45,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.example.sosapp.data.AppDatabase
 import com.example.sosapp.data.SosMessage
 import com.example.sosapp.network.MeshManager
+import com.example.sosapp.network.MeshService
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CoroutineScope
@@ -57,39 +63,62 @@ import kotlin.math.sin
 class MainActivity : ComponentActivity() {
     
     private lateinit var database: AppDatabase
-    private lateinit var meshManager: MeshManager
+    private var meshService by mutableStateOf<MeshService?>(null)
+    private var isBound = false
+
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as MeshService.MeshBinder
+            meshService = binder.getService()
+            isBound = true
+            Log.d("MainActivity", "Service Connected")
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            meshService = null
+            isBound = false
+            Log.d("MainActivity", "Service Disconnected")
+        }
+    }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         if (permissions.values.all { it }) {
-            meshManager.startMesh()
+            startMeshService()
         } else {
             Toast.makeText(this, "Permissions required for Mesh Networking", Toast.LENGTH_LONG).show()
         }
     }
-    
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
         database = AppDatabase.getDatabase(this)
-        meshManager = MeshManager(this, database.sosDao())
-        
-        checkPermissionsAndStartMesh()
+
+        checkPermissionsAndStartService()
 
         setContent {
             SOSAppTheme {
-                SOSScreen(database, meshManager, this)
+                val service = meshService
+                if (service != null) {
+                    service.getMeshManager()?.let { manager ->
+                        SOSScreen(database, manager, this)
+                    }
+                } else {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
             }
         }
     }
 
-    private fun checkPermissionsAndStartMesh() {
+    private fun checkPermissionsAndStartService() {
         val permissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
-        
+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
@@ -103,22 +132,40 @@ class MainActivity : ComponentActivity() {
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        val missing = permissions.filter { 
-            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED 
+        val missing = permissions.filter {
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
         if (missing.isNotEmpty()) {
             requestPermissionLauncher.launch(missing.toTypedArray())
         } else {
-            meshManager.startMesh()
+            startMeshService()
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        meshManager.stopMesh()
+    private fun startMeshService() {
+        val intent = Intent(this, MeshService::class.java)
+        ContextCompat.startForegroundService(this, intent)
+        bindService(intent, connection, BIND_AUTO_CREATE)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!isBound) {
+            val intent = Intent(this, MeshService::class.java)
+            bindService(intent, connection, BIND_AUTO_CREATE)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isBound) {
+            unbindService(connection)
+            isBound = false
+        }
     }
 
     fun getLastLocation(onLocation: (Double, Double) -> Unit) {
@@ -141,17 +188,18 @@ class MainActivity : ComponentActivity() {
             val intent = Intent(this, com.example.OCEN.MainActivity::class.java)
             startActivity(intent)
         } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to open map", e)
             Toast.makeText(this, "Map Activity not found", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun getVibrator(): Vibrator {
         return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            val vibratorManager = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
             vibratorManager.defaultVibrator
         } else {
             @Suppress("DEPRECATION")
-            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            getSystemService(VIBRATOR_SERVICE) as Vibrator
         }
     }
 
@@ -194,9 +242,13 @@ class MainActivity : ComponentActivity() {
                 try {
                     audioTrack.stop()
                     audioTrack.release()
-                } catch (e: Exception) { e.printStackTrace() }
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Error stopping audio track", e)
+                }
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error playing tone", e)
+        }
     }
 
     fun openManual() {
@@ -312,13 +364,13 @@ fun SOSButtonWithProgress(isActive: Boolean, onToggle: () -> Unit) {
             }
             Surface(
                 modifier = Modifier.size(180.dp).pointerInput(Unit) {
-                    detectTapGestures(onPress = { 
+                    detectTapGestures(onPress = {
                         progress = 1f
-                        try { 
-                            awaitRelease() 
-                        } finally { 
-                            progress = 0f 
-                        } 
+                        try {
+                            awaitRelease()
+                        } finally {
+                            progress = 0f
+                        }
                     })
                 },
                 shape = CircleShape, color = if (isActive) Color(0xFFD32F2F) else Color(0xFF424242), shadowElevation = 12.dp
