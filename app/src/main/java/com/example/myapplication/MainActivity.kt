@@ -1,6 +1,5 @@
-package com.example.OCEN
+package com.example.myapplication
 
-import android.content.Context
 import android.os.Bundle
 import androidx.preference.PreferenceManager
 import android.widget.Button
@@ -11,6 +10,7 @@ import org.osmdroid.tileprovider.cachemanager.CacheManager
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
+import com.example.myapplication.R
 
 class MainActivity : AppCompatActivity() {
 

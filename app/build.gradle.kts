@@ -5,14 +5,12 @@ plugins {
 
 android {
     namespace = "com.example.myapplication"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.myapplication"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -46,6 +44,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.preference)
+    implementation(libs.androidx.appcompat)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -55,5 +55,4 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation("com.google.android.gms:play-services-nearby:19.2.0")
     implementation("org.osmdroid:osmdroid-android:6.1.18")
-    implementation 'androidx.preference:preference-ktx:1.2.1'
 }
