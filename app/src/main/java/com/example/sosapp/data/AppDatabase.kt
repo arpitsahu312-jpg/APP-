@@ -9,11 +9,17 @@ interface SosDao {
     @Query("SELECT * FROM messages ORDER BY timestamp DESC")
     fun getAllMessages(): Flow<List<SosMessage>>
 
+    @Query("SELECT * FROM messages WHERE isUploaded = 0 ORDER BY timestamp DESC")
+    fun getUnuploadedMessages(): Flow<List<SosMessage>>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(message: SosMessage)
+
+    @Query("UPDATE messages SET isUploaded = 1 WHERE id = :messageId")
+    suspend fun markAsUploaded(messageId: String)
 }
 
-@Database(entities = [SosMessage::class], version = 1, exportSchema = false)
+@Database(entities = [SosMessage::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun sosDao(): SosDao
 

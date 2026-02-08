@@ -56,7 +56,7 @@ dependencies {
 
     implementation("com.google.android.gms:play-services-nearby:19.2.0")
     implementation("com.google.android.gms:play-services-location:21.2.0")
-    
+
     // Room Database
     val room_version = "2.6.1"
     implementation("androidx.room:room-runtime:$room_version")
@@ -65,8 +65,8 @@ dependencies {
     
     // Firebase
     implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.firestore.ktx)
-    implementation(libs.firebase.auth.ktx)
+    implementation(libs.firebase.firestore)
+    implementation(libs.firebase.auth)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.example.OCEN.sync.SyncTrigger
 import com.example.sosapp.data.AppDatabase
 import com.example.sosapp.data.SosMessage
 import com.example.sosapp.network.MeshManager
@@ -96,6 +97,9 @@ class MainActivity : ComponentActivity() {
         database = AppDatabase.getDatabase(this)
 
         checkPermissionsAndStartService()
+
+        // Trigger sync immediately when app starts
+        SyncTrigger.triggerSync(this)
 
         setContent {
             SOSAppTheme {
@@ -158,6 +162,8 @@ class MainActivity : ComponentActivity() {
             val intent = Intent(this, MeshService::class.java)
             bindService(intent, connection, BIND_AUTO_CREATE)
         }
+        // Also trigger sync on every start to catch internet becoming available
+        SyncTrigger.triggerSync(this)
     }
 
     override fun onStop() {

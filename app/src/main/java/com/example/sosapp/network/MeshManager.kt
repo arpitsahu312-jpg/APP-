@@ -11,12 +11,9 @@ import com.example.sosapp.data.SosMessage
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.*
 import com.google.gson.Gson
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
@@ -30,6 +27,7 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
 
     private val connectedEndpoints = mutableSetOf<String>()
     private var observationJob: Job? = null
+    private var lastBroadcastHash: Int = 0
 
     init {
         createSosNotificationChannel()
@@ -57,42 +55,43 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
     private fun observeMessages() {
         observationJob?.cancel()
         observationJob = CoroutineScope(Dispatchers.IO).launch {
-            dao.getAllMessages().collectLatest { messages ->
-                Log.d("MESH", "Database updated, re-broadcasting ${messages.size} messages")
+            dao.getUnuploadedMessages().collectLatest { messages ->
+                if (messages.isEmpty()) return@collectLatest
+                
+                val currentHash = messages.hashCode()
+                if (currentHash == lastBroadcastHash) return@collectLatest
+                
+                // Optimized delay for faster propagation
+                delay(300) 
+                
+                lastBroadcastHash = currentHash
+                Log.d("MESH", "Broadcasting ${messages.size} unuploaded messages...")
                 broadcastMessages(messages)
             }
         }
     }
 
     fun broadcastMessages(messages: List<SosMessage>) {
-        if (messages.isEmpty()) {
-            Log.v("MESH", "No messages to broadcast")
-            return
-        }
         val endpointsToNotify = synchronized(connectedEndpoints) { connectedEndpoints.toList() }
         
-        if (endpointsToNotify.isEmpty()) {
-            Log.w("MESH", "No connected endpoints to broadcast to. Connected count: 0")
-            return
-        }
+        if (endpointsToNotify.isEmpty()) return
         
-        Log.d("MESH", "Broadcasting ${messages.size} messages to ${endpointsToNotify.size} endpoints")
         val json = gson.toJson(messages)
         val payload = Payload.fromBytes(json.toByteArray(StandardCharsets.UTF_8))
         
-        endpointsToNotify.forEach { endpointId ->
-            Nearby.getConnectionsClient(context).sendPayload(endpointId, payload)
-                .addOnSuccessListener { Log.v("MESH", "Payload successfully sent to $endpointId") }
-                .addOnFailureListener { e -> Log.e("MESH", "Failed to send payload to $endpointId", e) }
-        }
+        Nearby.getConnectionsClient(context).sendPayload(endpointsToNotify, payload)
+            .addOnFailureListener { e -> Log.e("MESH", "Broadcast failed: ${e.message}") }
     }
 
     private fun startAdvertising() {
         val options = AdvertisingOptions.Builder().setStrategy(strategy).build()
         Nearby.getConnectionsClient(context).startAdvertising(
             myEndpointId, serviceId, connectionLifecycleCallback, options
-        ).addOnSuccessListener { Log.i("MESH", "Advertising started successfully") }
-         .addOnFailureListener { e -> Log.e("MESH", "Advertising failed to start", e) }
+        ).addOnSuccessListener { Log.i("MESH", "Advertising started") }
+         .addOnFailureListener { e -> 
+            Log.e("MESH", "Advertising failed, retrying...")
+            CoroutineScope(Dispatchers.Main).launch { delay(2000); startAdvertising() }
+         }
     }
 
     private fun startDiscovery() {
@@ -103,45 +102,36 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
             
         Nearby.getConnectionsClient(context).startDiscovery(
             serviceId, endpointDiscoveryCallback, options
-        ).addOnSuccessListener { Log.i("MESH", "Discovery started successfully") }
-         .addOnFailureListener { e -> Log.e("MESH", "Discovery failed to start", e) }
+        ).addOnSuccessListener { Log.i("MESH", "Discovery started") }
+         .addOnFailureListener { e -> 
+            Log.e("MESH", "Discovery failed, retrying...")
+            CoroutineScope(Dispatchers.Main).launch { delay(2000); startDiscovery() }
+         }
     }
 
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-            Log.i("MESH", "Found endpoint: $endpointId (${info.endpointName}). Requesting connection...")
+            Log.i("MESH", "Found: $endpointId. Connecting...")
             Nearby.getConnectionsClient(context).requestConnection(myEndpointId, endpointId, connectionLifecycleCallback)
-                .addOnFailureListener { e -> Log.e("MESH", "Connection request to $endpointId failed", e) }
         }
-        override fun onEndpointLost(endpointId: String) {
-            Log.i("MESH", "Endpoint lost: $endpointId")
-        }
+        override fun onEndpointLost(endpointId: String) {}
     }
 
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
-            Log.i("MESH", "Connection initiated with $endpointId (${info.endpointName}). Accepting...")
             Nearby.getConnectionsClient(context).acceptConnection(endpointId, payloadCallback)
-                .addOnFailureListener { e -> Log.e("MESH", "Accepting connection from $endpointId failed", e) }
         }
         override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
             if (result.status.isSuccess) {
-                Log.i("MESH", "Successfully connected to $endpointId")
+                Log.i("MESH", "Connected to $endpointId")
                 synchronized(connectedEndpoints) { connectedEndpoints.add(endpointId) }
-                // Sync immediately on connection: send all known messages to the new peer
                 CoroutineScope(Dispatchers.IO).launch {
-                    val messages = dao.getAllMessages().first()
-                    if (messages.isNotEmpty()) {
-                        Log.d("MESH", "Syncing known messages with new peer $endpointId")
-                        broadcastMessages(messages)
-                    }
+                    val messages = dao.getUnuploadedMessages().first()
+                    if (messages.isNotEmpty()) broadcastMessages(messages)
                 }
-            } else {
-                Log.e("MESH", "Connection to $endpointId failed with status: ${result.status.statusMessage}")
             }
         }
         override fun onDisconnected(endpointId: String) {
-            Log.w("MESH", "Disconnected from $endpointId")
             synchronized(connectedEndpoints) { connectedEndpoints.remove(endpointId) }
         }
     }
@@ -152,55 +142,51 @@ class MeshManager(private val context: Context, private val dao: SosDao) {
             val json = String(bytes, StandardCharsets.UTF_8)
             try {
                 val receivedMessages = gson.fromJson(json, Array<SosMessage>::class.java)
-                Log.d("MESH", "Received ${receivedMessages.size} messages from $endpointId")
                 CoroutineScope(Dispatchers.IO).launch {
-                    val currentMessages = dao.getAllMessages().first()
+                    val existingMessages = dao.getAllMessages().first()
+                    val existingIds = existingMessages.map { it.id }.toSet()
+                    
                     receivedMessages.forEach { incoming ->
                         if (incoming.senderId == myEndpointId) return@forEach
-                        if (currentMessages.none { it.id == incoming.id }) {
-                            Log.i("MESH", "Received NEW SOS message: ${incoming.id.take(8)} from ${incoming.senderId}")
+                        
+                        if (incoming.isUploaded) {
+                            dao.markAsUploaded(incoming.id)
+                            return@forEach
+                        }
+                        
+                        if (!existingIds.contains(incoming.id)) {
+                            Log.i("MESH", "Syncing New Message")
                             dao.insert(incoming.copy(isMyMessage = false, hopCount = incoming.hopCount + 1))
                             showSosNotification(incoming)
+                        } else {
+                            // Even if message exists, check if we need to update uploaded status locally
+                            val existing = existingMessages.find { it.id == incoming.id }
+                            if (existing != null && !existing.isUploaded && incoming.isUploaded) {
+                                dao.markAsUploaded(incoming.id)
+                            }
                         }
                     }
                 }
-            } catch (e: Exception) { 
-                Log.e("MESH", "Error parsing incoming payload from $endpointId", e) 
-            }
+            } catch (e: Exception) { Log.e("MESH", "Payload error") }
         }
-        override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {
-            if (update.status == PayloadTransferUpdate.Status.FAILURE) {
-                Log.e("MESH", "Payload transfer to $endpointId failed")
-            }
-        }
+        override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {}
     }
 
     private fun createSosNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = "Emergency SOS Alerts"
-            val descriptionText = "Notifications for received SOS messages"
-            val importance = NotificationManager.IMPORTANCE_HIGH
-            val channel = NotificationChannel("SOS_ALERT_CHANNEL", name, importance).apply {
-                description = descriptionText
-                enableVibration(true)
-                enableLights(true)
-            }
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(channel)
+            val channel = NotificationChannel("SOS_ALERT_CHANNEL", "Emergency SOS", NotificationManager.IMPORTANCE_HIGH)
+            (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
         }
     }
 
     private fun showSosNotification(message: SosMessage) {
-        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notification = NotificationCompat.Builder(context, "SOS_ALERT_CHANNEL")
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle("CRITICAL SOS RECEIVED!")
-            .setContentText("From: ${message.senderId.takeLast(10)} | Msg: ${message.content}")
+            .setContentTitle("SOS RECEIVED!")
+            .setContentText("Incoming Emergency Message")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)
             .build()
-
-        notificationManager.notify(message.id.hashCode(), notification)
+        (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(message.id.hashCode(), notification)
     }
 }

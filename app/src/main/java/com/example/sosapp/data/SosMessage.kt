@@ -13,5 +13,6 @@ data class SosMessage(
     val timestamp: Long,
     val isMyMessage: Boolean,
     val hopCount: Int = 0,
-    val equipment: String? = null // e.g., "First Aid Kit", "Water", etc.
+    val equipment: String? = null, // e.g., "First Aid Kit", "Water", etc.
+    val isUploaded: Boolean = false
 )
